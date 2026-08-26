@@ -13,7 +13,7 @@
 .externalNativeBuild
 .cxx
 app/build/
-
+app/release/
 .idea/
 .vscode/
 .vs/
