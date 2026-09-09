@@ -38,6 +38,8 @@ class ClaudeUsageClient(private val http: Http) {
         val root = JSONObject(response.body)
         val windows = mutableListOf<UsageWindow>()
 
+        // Keep the long-lived top-level fields as compatibility fallbacks. New structured limits are
+        // appended afterwards and therefore win during semantic de-duplication.
         addWindowValue(root.opt("five_hour"), "five_hour", "Session", SESSION_SECONDS, windows)
         addWindowValue(root.opt("seven_day"), "seven_day", "Weekly", WEEK_SECONDS, windows)
 
@@ -51,10 +53,13 @@ class ClaudeUsageClient(private val http: Http) {
             }
         }
 
-        // Newer Claude responses moved model-scoped weekly limits into limits[].
+        // Current Claude payloads may repeat Session/Weekly inside limits[] (or a map-shaped limits
+        // object) while also carrying genuinely separate model-scoped windows. Parse the structured
+        // representation last so it replaces the legacy representation instead of creating Limit 1/2.
         parseDynamicLimits(root.opt("limits"), windows)
 
-        if (windows.isEmpty()) {
+        val deduped = dedupeWindows(windows)
+        if (deduped.isEmpty()) {
             error("Claude usage response did not contain any recognized quota windows.")
         }
 
@@ -68,17 +73,10 @@ class ClaudeUsageClient(private val http: Http) {
             }
         }
 
-        // Prefer the later/newer representation when the same semantic model window is present twice.
-        val deduped = linkedMapOf<String, UsageWindow>()
-        windows.forEach { window ->
-            val semanticKey = "${window.label.lowercase(Locale.US)}|${window.windowSeconds ?: 0L}"
-            deduped[semanticKey] = window
-        }
-
         return ProviderUsage(
             provider = ProviderId.CLAUDE,
             plan = plan,
-            windows = deduped.values.toList(),
+            windows = deduped,
             creditsText = extraText,
         )
     }
@@ -107,46 +105,87 @@ class ClaudeUsageClient(private val http: Http) {
     }
 
     private fun parseDynamicLimits(rawLimits: Any?, out: MutableList<UsageWindow>) {
-        val entries = jsonObjects(rawLimits)
-        entries.forEachIndexed { index, item ->
-            val kind = item.optString("kind").takeIf { it.isNotBlank() }
+        val entries = namedJsonObjects(rawLimits)
+        entries.forEachIndexed { index, (entryName, item) ->
+            val rawKind = item.optString("kind").takeIf { it.isNotBlank() } ?: entryName
+            val kind = rawKind?.lowercase(Locale.US)?.replace('-', '_')
             val modelName = scopedModelName(item)
-            val displayName = modelName
+            val explicitName = modelName
                 ?: item.optString("display_name").takeIf { it.isNotBlank() }
                 ?: item.optString("name").takeIf { it.isNotBlank() }
-                ?: "Limit ${index + 1}"
+                ?: friendlyEntryName(entryName)
 
             // Future/alternate payloads may put window-shaped data below rate_limit.
             val nestedRateLimit = item.optJSONObject("rate_limit")
             if (nestedRateLimit != null) {
+                val baseLabel = explicitName ?: "Limit ${index + 1}"
                 parseNestedRateLimit(
                     nestedRateLimit,
-                    keyPrefix = "limit_${slug(displayName)}",
-                    baseLabel = displayName,
+                    keyPrefix = "limit_${slug(baseLabel)}",
+                    baseLabel = baseLabel,
                     out = out,
                 )
                 return@forEachIndexed
             }
 
             val percent = usedPercent(item) ?: return@forEachIndexed
-            val label = when (kind) {
-                "weekly_scoped" -> displayName
-                else -> displayName
+            val seconds = optLong(item, "limit_window_seconds", "window_seconds")
+            val semanticKind = classifyLimit(kind, modelName, seconds)
+            val (key, label, defaultSeconds) = when (semanticKind) {
+                ClaudeLimitKind.SESSION -> Triple("five_hour", "Session", SESSION_SECONDS)
+                ClaudeLimitKind.WEEKLY -> Triple("seven_day", "Weekly", WEEK_SECONDS)
+                ClaudeLimitKind.SCOPED_WEEKLY -> {
+                    val scopedLabel = explicitName ?: "Scoped Weekly"
+                    Triple("limit_scoped_${slug(scopedLabel)}", scopedLabel, WEEK_SECONDS)
+                }
+                ClaudeLimitKind.UNKNOWN -> {
+                    val unknownLabel = explicitName ?: "Limit ${index + 1}"
+                    Triple(
+                        item.optString("id").takeIf { it.isNotBlank() }
+                            ?: "limit_${slug(kind ?: "dynamic")}_${slug(unknownLabel)}",
+                        unknownLabel,
+                        seconds ?: WEEK_SECONDS,
+                    )
+                }
             }
-            val defaultSeconds = when {
-                kind?.contains("five", ignoreCase = true) == true || kind?.contains("session", ignoreCase = true) == true -> SESSION_SECONDS
-                else -> WEEK_SECONDS
-            }
-            val key = item.optString("id").takeIf { it.isNotBlank() }
-                ?: "limit_${slug(kind ?: "dynamic")}_${slug(displayName)}"
+
             out += UsageWindow(
                 key = key,
                 label = label,
                 usedPercent = percent,
                 resetsAtEpochMs = resetAt(item),
-                windowSeconds = optLong(item, "limit_window_seconds", "window_seconds") ?: defaultSeconds,
+                windowSeconds = seconds ?: defaultSeconds,
             )
         }
+    }
+
+    private enum class ClaudeLimitKind {
+        SESSION,
+        WEEKLY,
+        SCOPED_WEEKLY,
+        UNKNOWN,
+    }
+
+    private fun classifyLimit(kind: String?, modelName: String?, seconds: Long?): ClaudeLimitKind {
+        val normalized = kind.orEmpty()
+        if (normalized in setOf("session", "five_hour", "five_hour_session", "rolling_5h", "rolling_5_hour")) {
+            return ClaudeLimitKind.SESSION
+        }
+        if (normalized in setOf("weekly_all", "weekly", "seven_day", "seven_day_all")) {
+            return ClaudeLimitKind.WEEKLY
+        }
+        if (normalized == "weekly_scoped" || modelName != null) {
+            return ClaudeLimitKind.SCOPED_WEEKLY
+        }
+        if (normalized.contains("session") || normalized.contains("five_hour")) {
+            return ClaudeLimitKind.SESSION
+        }
+        if ((normalized.contains("weekly") || normalized.contains("seven_day")) && !normalized.contains("scoped")) {
+            return ClaudeLimitKind.WEEKLY
+        }
+        if (seconds == SESSION_SECONDS) return ClaudeLimitKind.SESSION
+        if (seconds == WEEK_SECONDS) return ClaudeLimitKind.WEEKLY
+        return ClaudeLimitKind.UNKNOWN
     }
 
     private fun parseNestedRateLimit(
@@ -177,22 +216,70 @@ class ClaudeUsageClient(private val http: Http) {
         }
     }
 
-    private fun jsonObjects(value: Any?): List<JSONObject> = when (value) {
+    private fun jsonObjects(value: Any?): List<JSONObject> = namedJsonObjects(value).map { it.second }
+
+    /**
+     * Preserves dictionary keys for map-shaped quota payloads. Without this, a payload such as
+     * {"session": {...}, "weekly_all": {...}} lost those names and surfaced as "Limit 1/2".
+     */
+    private fun namedJsonObjects(value: Any?): List<Pair<String?, JSONObject>> = when (value) {
         is JSONObject -> {
-            // A map-shaped bucket can either be the bucket itself or a dictionary of bucket objects.
             if (hasUsageFields(value) || value.has("kind") || value.has("scope") || value.has("rate_limit")) {
-                listOf(value)
+                listOf(null to value)
             } else {
-                val result = mutableListOf<JSONObject>()
+                val result = mutableListOf<Pair<String?, JSONObject>>()
                 val keys = value.keys()
                 while (keys.hasNext()) {
-                    value.optJSONObject(keys.next())?.let(result::add)
+                    val key = keys.next()
+                    value.optJSONObject(key)?.let { result += key to it }
                 }
                 result
             }
         }
-        is JSONArray -> (0 until value.length()).mapNotNull { value.optJSONObject(it) }
+        is JSONArray -> (0 until value.length()).mapNotNull { index ->
+            value.optJSONObject(index)?.let { null to it }
+        }
         else -> emptyList()
+    }
+
+    private fun friendlyEntryName(entryName: String?): String? {
+        val raw = entryName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val normalized = raw.lowercase(Locale.US).replace('-', '_')
+        if (normalized in setOf("session", "five_hour", "five_hour_session")) return "Session"
+        if (normalized in setOf("weekly", "weekly_all", "seven_day", "seven_day_all")) return "Weekly"
+        if (normalized.matches(Regex("limit_?\\d+"))) return null
+        return humanize(normalized)
+    }
+
+    /**
+     * Structured Claude responses can repeat the top-level Session/Weekly rows. Known semantic rows are
+     * de-duplicated by label+period with the later structured value winning. As an extra schema-drift
+     * guard, a generic "Limit N" row is dropped when it is byte-for-byte equivalent in quota meaning to
+     * an already named row (same period, percent and reset timestamp).
+     */
+    private fun dedupeWindows(windows: List<UsageWindow>): List<UsageWindow> {
+        val named = windows.filterNot { isGenericLimitLabel(it.label) }
+        val filtered = windows.filterNot { candidate ->
+            isGenericLimitLabel(candidate.label) && named.any { namedWindow -> equivalentQuota(candidate, namedWindow) }
+        }
+
+        val deduped = linkedMapOf<String, UsageWindow>()
+        filtered.forEach { window ->
+            val semanticKey = "${window.label.lowercase(Locale.US)}|${window.windowSeconds ?: 0L}"
+            deduped[semanticKey] = window
+        }
+        return deduped.values.toList()
+    }
+
+    private fun isGenericLimitLabel(label: String): Boolean =
+        label.matches(Regex("(?i)limit\\s*\\d+")) || label.equals("Limit", ignoreCase = true)
+
+    private fun equivalentQuota(a: UsageWindow, b: UsageWindow): Boolean {
+        if (kotlin.math.abs(a.usedPercent - b.usedPercent) > 0.001) return false
+        // A shared reset timestamp is the strongest duplicate signal and survives payloads that omit
+        // period metadata on one of the two representations.
+        if (a.resetsAtEpochMs != null && a.resetsAtEpochMs == b.resetsAtEpochMs) return true
+        return a.windowSeconds == b.windowSeconds && a.resetsAtEpochMs == b.resetsAtEpochMs
     }
 
     private fun hasUsageFields(obj: JSONObject): Boolean =

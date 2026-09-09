@@ -33,6 +33,8 @@ Newer model-specific weekly limits can arrive through `limits[]`, for example:
 
 The parser accepts object or array buckets, `utilization`, `used_percent`, `percent`, and legacy `percent_left` semantics, plus ISO/epoch reset aliases.
 
+Some current responses repeat the core quotas inside `limits` as `kind: "session"` / `kind: "weekly_all"` while still returning `five_hour` / `seven_day`. Map-shaped payloads may use those semantic names as dictionary keys instead of a `kind` property. CodeMeter preserves those keys, maps them back to Session/Weekly, lets the structured value replace the legacy duplicate, and only keeps `weekly_scoped` / genuinely distinct limits as extra rows. Anonymous `Limit N` rows that exactly match a named quota's percent/reset identity are suppressed as a final schema-drift guard.
+
 ### Rate limiting
 
 `/api/oauth/usage` can return aggressive per-account 429s when Claude Code sessions and external monitors poll concurrently. CodeMeter:

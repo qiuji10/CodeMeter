@@ -45,13 +45,9 @@ jobs:
           # is not visible to sdkmanager's default stable channel.
           (yes 2>/dev/null | sdkmanager --licenses >/dev/null 2>&1) || true
 
-          # Refresh command-line tools first so the runner can see the newest
-          # preview repository metadata.
           sdkmanager --channel=3 "cmdline-tools;latest"
           export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
 
-          # Google has used both android-37 and android-37.0 package IDs while
-          # API 37 is in preview. Discover the package instead of hardcoding one.
           SDK_LIST="$(mktemp)"
           sdkmanager --list --channel=3 > "$SDK_LIST"
 
@@ -85,12 +81,6 @@ jobs:
       - name: Run project integrity checks
         run: python3 scripts/verify_project.py
 
-      - name: Run unit tests
-        run: ./gradlew --no-daemon testDebugUnitTest
-
-      - name: Build debug and release APKs
-        run: ./gradlew --no-daemon assembleDebug assembleRelease
-
       - name: Read app version
         id: version
         shell: bash
@@ -102,8 +92,96 @@ jobs:
           echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
 
+      - name: Configure release signing
+        id: signing
+        shell: bash
+        env:
+          CODEMETER_KEYSTORE_BASE64: ${{ secrets.CODEMETER_KEYSTORE_BASE64 }}
+          CODEMETER_KEYSTORE_PASSWORD: ${{ secrets.CODEMETER_KEYSTORE_PASSWORD }}
+          CODEMETER_KEY_ALIAS: ${{ secrets.CODEMETER_KEY_ALIAS }}
+          CODEMETER_KEY_PASSWORD: ${{ secrets.CODEMETER_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          values=(
+            "$CODEMETER_KEYSTORE_BASE64"
+            "$CODEMETER_KEYSTORE_PASSWORD"
+            "$CODEMETER_KEY_ALIAS"
+            "$CODEMETER_KEY_PASSWORD"
+          )
+          configured=0
+          for value in "${values[@]}"; do
+            [[ -n "$value" ]] && configured=$((configured + 1))
+          done
+
+          if [[ "$configured" -eq 0 ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Release signing secrets are not configured; CI will produce an unsigned release APK."
+            if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+              echo "::error::Release tags require CodeMeter signing secrets. Configure the four CODEMETER_* repository secrets first."
+              exit 1
+            fi
+            exit 0
+          fi
+
+          if [[ "$configured" -ne 4 ]]; then
+            echo "::error::Release signing is partially configured. Set all four CODEMETER_* signing secrets."
+            exit 1
+          fi
+
+          KEYSTORE_PATH="$RUNNER_TEMP/codemeter-release.jks"
+          printf '%s' "$CODEMETER_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+
+          echo "CODEMETER_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "Release signing key decoded into the ephemeral runner workspace."
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build debug and release APKs
+        run: ./gradlew --no-daemon assembleDebug assembleRelease
+
+      - name: Sign and verify release APK
+        id: sign_release
+        if: steps.signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          CODEMETER_KEYSTORE_PASSWORD: ${{ secrets.CODEMETER_KEYSTORE_PASSWORD }}
+          CODEMETER_KEY_ALIAS: ${{ secrets.CODEMETER_KEY_ALIAS }}
+          CODEMETER_KEY_PASSWORD: ${{ secrets.CODEMETER_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          UNSIGNED_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          SIGNED_APK="$RUNNER_TEMP/CodeMeter-v${{ steps.version.outputs.name }}.apk"
+          test -s "$UNSIGNED_APK"
+          test -s "$CODEMETER_KEYSTORE_PATH"
+
+          APKSIGNER="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          if [[ -z "$APKSIGNER" ]]; then
+            echo "::error::Unable to locate apksigner in the installed Android build-tools."
+            exit 1
+          fi
+          chmod +x "$APKSIGNER"
+
+          "$APKSIGNER" sign \
+            --ks "$CODEMETER_KEYSTORE_PATH" \
+            --ks-key-alias "$CODEMETER_KEY_ALIAS" \
+            --ks-pass env:CODEMETER_KEYSTORE_PASSWORD \
+            --key-pass env:CODEMETER_KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            "$UNSIGNED_APK"
+
+          "$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK"
+          test -s "$SIGNED_APK"
+          echo "apk=$SIGNED_APK" >> "$GITHUB_OUTPUT"
+
       - name: Package CI artifacts
         shell: bash
+        env:
+          SIGNED_APK: ${{ steps.sign_release.outputs.apk }}
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.name }}"
@@ -119,6 +197,11 @@ jobs:
           cp "$DEBUG_APK" "$OUT/CodeMeter-v${VERSION}-debug.apk"
           cp "$RELEASE_APK" "$OUT/CodeMeter-v${VERSION}-release-unsigned.apk"
 
+          if [[ -n "${SIGNED_APK:-}" ]]; then
+            test -s "$SIGNED_APK"
+            cp "$SIGNED_APK" "$OUT/CodeMeter-v${VERSION}.apk"
+          fi
+
           # Package only tracked repository files so build caches, local SDK paths,
           # signing keys, and generated outputs can never leak into the source ZIP.
           git archive --format=zip --prefix=CodeMeter/ HEAD \
@@ -128,11 +211,15 @@ jobs:
 
           (
             cd "$OUT"
-            sha256sum \
-              "CodeMeter-v${VERSION}-debug.apk" \
-              "CodeMeter-v${VERSION}-release-unsigned.apk" \
-              "CodeMeter-android-v${VERSION}-source.zip" \
-              > SHA256SUMS.txt
+            files=(
+              "CodeMeter-v${VERSION}-debug.apk"
+              "CodeMeter-v${VERSION}-release-unsigned.apk"
+              "CodeMeter-android-v${VERSION}-source.zip"
+            )
+            if [[ -f "CodeMeter-v${VERSION}.apk" ]]; then
+              files+=("CodeMeter-v${VERSION}.apk")
+            fi
+            sha256sum "${files[@]}" > SHA256SUMS.txt
             sha256sum --check SHA256SUMS.txt
           )
 
@@ -143,10 +230,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CodeMeter-v${{ steps.version.outputs.name }}-android
-          path: |
-            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-v${{ steps.version.outputs.name }}-debug.apk
-            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-v${{ steps.version.outputs.name }}-release-unsigned.apk
-            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-android-v${{ steps.version.outputs.name }}-source.zip
-            ${{ runner.temp }}/codemeter-artifacts/SHA256SUMS.txt
+          path: ${{ runner.temp }}/codemeter-artifacts/
           if-no-files-found: error
           retention-days: 14

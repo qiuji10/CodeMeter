@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+- Fixed Claude Code duplicate quota rows where the current structured `limits` payload repeated Session/Weekly and CodeMeter displayed them again as `Limit 1` / `Limit 2`.
+- Claude structured limits now preserve map keys, classify `session` / `weekly_all` / `weekly_scoped`, prefer the structured value over the legacy top-level representation, and keep genuinely separate model-scoped limits such as Fable.
+- Added duplicate protection for anonymous schema-drift rows that have the same percent/reset identity as a named Session or Weekly quota.
+- Added regression unit tests for array-shaped structured limits, map-shaped limits, and anonymous duplicate limits.
+- GitHub Actions can now create and verify a signed release APK when the four CodeMeter signing secrets are configured.
+- Release tags fail closed when signing secrets are missing, while normal branch/PR CI can still build debug and unsigned-release verification artifacts.
+- Version bumped to 0.4.1 (`versionCode` 15).
+
 ## 0.4.0
 
 - Updated Claude Code usage requests to the current OAuth usage request shape, including Claude Code headers and current OAuth scopes.

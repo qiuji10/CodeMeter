@@ -11,8 +11,8 @@ android {
         applicationId = "com.qiuji.codemeter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.4.0"
+        versionCode = 15
+        versionName = "0.4.1"
     }
 
     buildFeatures {
@@ -59,4 +59,5 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
 }

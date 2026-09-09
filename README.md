@@ -94,6 +94,39 @@ APK output:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## GitHub Actions signed release
+
+`.github/workflows/android.yml` always runs integrity checks, unit tests, and Debug/Release builds. When release-signing secrets are configured, CI also signs the release APK with your permanent CodeMeter key and verifies the certificate with `apksigner`.
+
+Create these **Repository secrets** under **GitHub -> Settings -> Secrets and variables -> Actions**:
+
+```text
+CODEMETER_KEYSTORE_BASE64
+CODEMETER_KEYSTORE_PASSWORD
+CODEMETER_KEY_ALIAS
+CODEMETER_KEY_PASSWORD
+```
+
+`CODEMETER_KEYSTORE_BASE64` must contain the Base64 representation of the same `.jks` / `.keystore` that signed your existing `com.qiuji.codemeter` release. Using a different key makes Android reject an in-place update with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Never commit the keystore itself.
+
+PowerShell example for creating the Base64 secret value:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\codemeter-release.jks"))
+```
+
+With all four secrets present, the workflow artifact includes:
+
+```text
+CodeMeter-v0.4.1.apk                  # signed release; distribute/install this
+CodeMeter-v0.4.1-debug.apk            # CI/debug only
+CodeMeter-v0.4.1-release-unsigned.apk # verification only; Android cannot install it
+CodeMeter-android-v0.4.1-source.zip
+SHA256SUMS.txt
+```
+
+Normal branch and pull-request CI still works without signing secrets and simply omits the signed APK. A `v*` tag is stricter: the job fails if signing is not configured, preventing an unsigned APK from being mistaken for a release.
+
 ## Adding profiles
 
 1. Tap **+** in the home toolbar.

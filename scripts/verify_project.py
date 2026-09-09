@@ -21,6 +21,8 @@ required = [
     "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexAuth.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexUsageClient.kt",
     "app/src/main/java/com/qiuji/codemeter/worker/ResetNotificationWorker.kt",
+    "app/src/test/java/com/qiuji/codemeter/provider/claude/ClaudeUsageClientTest.kt",
+    ".github/workflows/android.yml",
 ]
 missing = [p for p in required if not (root / p).is_file()]
 if missing:
@@ -78,11 +80,17 @@ assert "data class HttpResponseData" in http and "retryAfterEpochMs" in http
 assert '"User-Agent" to "claude-code/2.1.69"' in claude
 assert '"Content-Type" to "application/json"' in claude
 assert 'item.optString("kind")' in claude and 'optString("display_name")' in claude
+assert "weekly_all" in claude and "weekly_scoped" in claude and "namedJsonObjects" in claude
+assert "dedupeWindows" in claude and "equivalentQuota" in claude
 assert '"x-codex-primary-used-percent"' in codex and '"limit_window_seconds"' in codex
 assert "RESET_CREDITS_URL" in codex and "rate-limit-reset-credits" in codex
 assert "providerCooldownUntil" in repo and "staleUsage" in repo
 assert "ProcessLifecycleOwner" in app and "override fun onStart" in app
 assert "formatFreshness" in screen and "Rate limited" in repo
-assert 'versionName = "0.4.0"' in (root / "app/build.gradle.kts").read_text()
+gradle = (root / "app/build.gradle.kts").read_text()
+assert 'versionName = "0.4.1"' in gradle and "versionCode = 15" in gradle
+workflow = (root / ".github/workflows/android.yml").read_text()
+assert "CODEMETER_KEYSTORE_BASE64" in workflow and "apksigner" in workflow
+assert "Release tags require CodeMeter signing secrets" in workflow
 
 print("Project structure, migration, XML, and security checks passed.")
