@@ -159,6 +159,11 @@ class UsageNotifier(
     ) {
         if (prefs.getLong(resetNotifiedKey(usage.profileId, windowKey), Long.MIN_VALUE) == resetAtEpochMs) return
 
+        // v0.4 normalizes provider slot names into semantic keys (session/weekly). Cancel the old
+        // v0.3.x unique-work names before scheduling the semantic replacement so an in-flight reset
+        // from an upgraded install cannot notify twice.
+        cancelLegacyResetWork(usage.profileId, windowKey)
+
         val delayMs = (resetAtEpochMs - nowEpochMs).coerceAtLeast(1_000L)
         val data = Data.Builder()
             .putString(ResetNotificationWorker.KEY_PROFILE_ID, usage.profileId)
@@ -178,6 +183,19 @@ class UsageNotifier(
             ExistingWorkPolicy.REPLACE,
             request,
         )
+    }
+
+
+    private fun cancelLegacyResetWork(profileId: String, windowKey: String) {
+        val legacyKeys = when {
+            windowKey == "session" -> listOf("primary_window", "primary", "five_hour")
+            windowKey == "weekly" -> listOf("secondary_window", "secondary")
+            windowKey.startsWith("additional_") && windowKey.endsWith("_session") ->
+                listOf(windowKey.removeSuffix("_session"))
+            else -> emptyList()
+        }
+        val workManager = WorkManager.getInstance(context)
+        legacyKeys.forEach { legacyKey -> workManager.cancelUniqueWork(resetWorkName(profileId, legacyKey)) }
     }
 
     private fun postResetNotification(

@@ -27,6 +27,7 @@ class AppGraph(context: Context) {
     val repository = UsageRepository(
         secureStore = secureStore,
         profileStore = profileStore,
+        settingsStore = settingsStore,
         historyDb = historyDb,
         claudeAuth = claudeAuth,
         claudeUsageClient = claudeUsage,

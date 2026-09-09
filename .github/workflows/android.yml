@@ -1,0 +1,118 @@
+name: Android CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-and-package:
+    name: Verify and package Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 37 platform
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-37"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Run project integrity checks
+        run: python3 scripts/verify_project.py
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build debug and release APKs
+        run: ./gradlew --no-daemon assembleDebug assembleRelease
+
+      - name: Read app version
+        id: version
+        shell: bash
+        run: |
+          VERSION_NAME=$(sed -n 's/^[[:space:]]*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)
+          VERSION_CODE=$(sed -n 's/^[[:space:]]*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts | head -n 1)
+          test -n "$VERSION_NAME"
+          test -n "$VERSION_CODE"
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: Package CI artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.name }}"
+          OUT="$RUNNER_TEMP/codemeter-artifacts"
+          mkdir -p "$OUT"
+
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+
+          test -s "$DEBUG_APK"
+          test -s "$RELEASE_APK"
+
+          cp "$DEBUG_APK" "$OUT/CodeMeter-v${VERSION}-debug.apk"
+          cp "$RELEASE_APK" "$OUT/CodeMeter-v${VERSION}-release-unsigned.apk"
+
+          # Package only tracked repository files so build caches, local SDK paths,
+          # signing keys, and generated outputs can never leak into the source ZIP.
+          git archive --format=zip --prefix=CodeMeter/ HEAD \
+            -o "$OUT/CodeMeter-android-v${VERSION}-source.zip"
+
+          unzip -t "$OUT/CodeMeter-android-v${VERSION}-source.zip"
+
+          (
+            cd "$OUT"
+            sha256sum \
+              "CodeMeter-v${VERSION}-debug.apk" \
+              "CodeMeter-v${VERSION}-release-unsigned.apk" \
+              "CodeMeter-android-v${VERSION}-source.zip" \
+              > SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
+
+          echo "Packaged artifacts:"
+          ls -lh "$OUT"
+
+      - name: Upload verification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeMeter-v${{ steps.version.outputs.name }}-android
+          path: |
+            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-v${{ steps.version.outputs.name }}-debug.apk
+            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-v${{ steps.version.outputs.name }}-release-unsigned.apk
+            ${{ runner.temp }}/codemeter-artifacts/CodeMeter-android-v${{ steps.version.outputs.name }}-source.zip
+            ${{ runner.temp }}/codemeter-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

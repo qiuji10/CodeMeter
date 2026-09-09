@@ -1,44 +1,94 @@
 # Provider integration notes
 
-These integrations intentionally live behind small provider classes because neither subscription-usage API is a stable public third-party contract.
+CodeMeter talks directly to subscription-usage endpoints from the Android client. These endpoints and first-party OAuth client identifiers are not stable public third-party contracts, so provider HTTP/parsing logic is intentionally isolated.
 
-## Claude
+## Claude Code
 
-`ClaudeAuth.kt` owns all OAuth constants and token handling. `ClaudeUsageClient.kt` owns the usage endpoint and response parsing.
+### OAuth
 
-Expected quota response fields currently include `five_hour`, `seven_day`, optional `seven_day_<model>` objects, and possibly dynamic `limits`. Each recognized object supplies a utilization/used percentage and a reset timestamp. The current service reports usage as percentages; the parser preserves those 0-100 values and only clamps malformed out-of-range values.
+- Authorization: `https://claude.com/cai/oauth/authorize`
+- Token/refresh: `https://platform.claude.com/v1/oauth/token`
+- Usage: `GET https://api.anthropic.com/api/oauth/usage`
+- Beta header: `anthropic-beta: oauth-2025-04-20`
+- Authorization scope follows the working Claude Code manual flow: `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`. Token refresh requests the user scopes without `org:create_api_key`.
 
-The OAuth token exchange/refresh has been observed with JSON and form-encoded variants in third-party/current-client implementations, so `ClaudeAuth` attempts JSON first and falls back to form encoding for 4xx encoding/contract failures.
+Live usage requires `user:profile`. Existing credentials without that scope are refreshed before a usage request; a 403 should be treated as a reconnect/scope problem rather than silently returning empty bars.
 
-The usage request currently sends:
+### Current usage shapes
 
-```text
-Authorization: Bearer <access_token>
-anthropic-beta: oauth-2025-04-20
+Core windows remain `five_hour` and `seven_day` with percentage usage and reset timestamps. CodeMeter also accepts legacy `seven_day_<model>` fields.
+
+Newer model-specific weekly limits can arrive through `limits[]`, for example:
+
+```json
+{
+  "kind": "weekly_scoped",
+  "percent": 52,
+  "resets_at": "2026-09-14T00:00:00Z",
+  "scope": {
+    "model": { "display_name": "Fable" }
+  }
+}
 ```
 
-A 403 most commonly means the token is missing the profile/session permission needed by the usage route, or Anthropic changed the private contract.
+The parser accepts object or array buckets, `utilization`, `used_percent`, `percent`, and legacy `percent_left` semantics, plus ISO/epoch reset aliases.
+
+### Rate limiting
+
+`/api/oauth/usage` can return aggressive per-account 429s when Claude Code sessions and external monitors poll concurrently. CodeMeter:
+
+1. reads `Retry-After` as seconds or an HTTP date;
+2. persists the profile cooldown across process restarts;
+3. does not call the endpoint again before that cooldown ends, even for manual/background refresh;
+4. keeps the last successful quota snapshot visible with a stale/rate-limited annotation;
+5. never records stale values as new history or uses them for quota notifications.
+
+If `Retry-After` is absent, CodeMeter uses a conservative five-minute cooldown.
 
 ## Codex
 
-`CodexAuth.kt` implements ChatGPT/Codex device authorization. The device-code request returns a `device_auth_id`, `user_code`, and poll interval. After browser approval, polling returns the authorization-code/PKCE material, which is exchanged at the OAuth token endpoint.
+### OAuth and usage
 
-`CodexUsageClient.kt` calls the current ChatGPT usage route with:
+- Token: `https://auth.openai.com/oauth/token`
+- Usage: `GET https://chatgpt.com/backend-api/wham/usage`
+- Reset credits: `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
 
-```text
-Authorization: Bearer <access_token>
-ChatGPT-Account-Id: <account_id>
-```
+Usage requests include the bearer token and `ChatGPT-Account-Id`. The dedicated reset-credit request is best-effort; failure there must never blank normal quota data.
 
-It accepts both `rate_limit` and `rate_limits`, plus aliases for primary/secondary windows. Window duration is used to label the shorter quota as Session and the longer one as Weekly. `additional_rate_limits` are preserved when recognizable.
+### Window classification
+
+Do not assume `primary_window` always means 5-hour and `secondary_window` always means weekly. Codex can place a sole weekly window in the primary slot. CodeMeter classifies observed windows by `limit_window_seconds` first:
+
+- `18000` -> Session / 5-hour
+- `604800` -> Weekly / 7-day
+
+Slot position is only a compatibility fallback when duration is missing/unknown. Missing windows stay missing rather than being synthesized from stale data.
+
+Percentages are read from body fields (`used_percent`, legacy `percent_left`, etc.) and can fall back to `x-codex-primary-used-percent` / `x-codex-secondary-used-percent` headers.
+
+### Additional limits
+
+`additional_rate_limits[]` can carry named model-specific rate limits with their own primary/secondary windows. `limit_name` is preferred, then `display_name`, `name`, and `metered_feature`.
+
+Spark telemetry is hidden for Plus profiles because the backend can expose that bucket even when the plan cannot use Spark. Eligible plans can show both Spark and Spark Weekly when returned.
+
+### Reset and flex credits
+
+The main usage payload can expose `rate_limit_reset_credits.available_count`. The dedicated reset-credit endpoint can return richer data; CodeMeter currently shows the available count read-only and does not offer a consume/reset action.
+
+`credits.balance` is shown as a credit count plus its current 4-cent-per-credit equivalent.
+
+## HTTP behavior
+
+The shared HTTP layer preserves response status, headers, and body. This is required because current provider behavior uses response headers for retry timing and, in Codex's case, quota percentage fallbacks.
 
 ## Updating safely
 
 If a provider breaks:
 
-1. Confirm login still works in the official Claude Code or Codex CLI.
-2. Compare the official client's current OAuth constants/flow with the corresponding auth class.
-3. Capture only your own usage response shape; do not log bearer/refresh/ID tokens.
-4. Add parser aliases rather than replacing old aliases when practical.
-5. Test token refresh separately from initial login.
-6. Keep rate-limit polling conservative.
+1. Confirm login/usage still works in the current official Claude Code or Codex client.
+2. Compare current first-party endpoint/request headers and OAuth scopes.
+3. Capture only your own redacted response shape; never log bearer, refresh, ID tokens, or raw auth files.
+4. Add schema aliases/fallbacks rather than deleting older compatible shapes unless they are unsafe.
+5. Test 401, 403, 429, 5xx, missing-window, and token-refresh behavior independently.
+6. Respect provider cooldowns; repeated manual refresh must never bypass `Retry-After`.

@@ -13,7 +13,11 @@
 .externalNativeBuild
 .cxx
 app/build/
-app/release/
-.idea/
-.vscode/
-.vs/
+
+# Generated release outputs
+/app/release/
+
+# Release signing material
+*.jks
+*.keystore
+keystore.properties

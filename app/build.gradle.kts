@@ -11,8 +11,8 @@ android {
         applicationId = "com.qiuji.codemeter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 11
-        versionName = "0.3.8"
+        versionCode = 14
+        versionName = "0.4.0"
     }
 
     buildFeatures {
@@ -45,6 +45,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.compose.ui:ui")

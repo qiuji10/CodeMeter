@@ -1,6 +1,9 @@
 package com.qiuji.codemeter
 
 import android.app.Application
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -16,7 +19,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-class CodeMeterApplication : Application() {
+class CodeMeterApplication : Application(), DefaultLifecycleObserver {
     lateinit var graph: AppGraph
         private set
 
@@ -27,6 +30,17 @@ class CodeMeterApplication : Application() {
         graph = AppGraph(applicationContext)
         graph.notifier.createChannel()
         observeBackgroundRefreshSettings()
+        ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+    }
+
+    /**
+     * Process lifecycle START means the whole app entered the foreground. This fires once on a cold
+     * launch and once on each warm return from background, but not for Activity recreation/rotation.
+     * It intentionally ignores the periodic Auto refresh toggle: opening CodeMeter should always ask
+     * for fresh quota data. Provider Retry-After cooldowns are still authoritative in the repository.
+     */
+    override fun onStart(owner: LifecycleOwner) {
+        applicationScope.launch { graph.repository.refreshAll() }
     }
 
     private fun observeBackgroundRefreshSettings() {

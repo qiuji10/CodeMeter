@@ -15,6 +15,7 @@ required = [
     "app/src/main/java/com/qiuji/codemeter/data/ProfileStore.kt",
     "app/src/main/java/com/qiuji/codemeter/data/SettingsStore.kt",
     "app/src/main/java/com/qiuji/codemeter/data/UsageRepository.kt",
+    "app/src/main/java/com/qiuji/codemeter/network/Http.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeAuth.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeUsageClient.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexAuth.kt",
@@ -69,5 +70,19 @@ source = "\n".join(
 assert "Log.d(" not in source and "Log.v(" not in source and "println(" not in source
 assert "sk-ant-" not in source and "sk-proj-" not in source
 assert not re.search(r'Bearer\s+[A-Za-z0-9_-]{20,}', source)
+
+http = (root / "app/src/main/java/com/qiuji/codemeter/network/Http.kt").read_text()
+repo = (root / "app/src/main/java/com/qiuji/codemeter/data/UsageRepository.kt").read_text()
+app = (root / "app/src/main/java/com/qiuji/codemeter/CodeMeterApplication.kt").read_text()
+assert "data class HttpResponseData" in http and "retryAfterEpochMs" in http
+assert '"User-Agent" to "claude-code/2.1.69"' in claude
+assert '"Content-Type" to "application/json"' in claude
+assert 'item.optString("kind")' in claude and 'optString("display_name")' in claude
+assert '"x-codex-primary-used-percent"' in codex and '"limit_window_seconds"' in codex
+assert "RESET_CREDITS_URL" in codex and "rate-limit-reset-credits" in codex
+assert "providerCooldownUntil" in repo and "staleUsage" in repo
+assert "ProcessLifecycleOwner" in app and "override fun onStart" in app
+assert "formatFreshness" in screen and "Rate limited" in repo
+assert 'versionName = "0.4.0"' in (root / "app/build.gradle.kts").read_text()
 
 print("Project structure, migration, XML, and security checks passed.")

@@ -18,6 +18,7 @@ class ClaudeAuth(
         const val TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
         const val REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
         const val SCOPE = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+        const val REFRESH_SCOPE = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
         private const val PENDING_VERIFIER = "claude_pending_verifier"
         private const val PENDING_STATE = "claude_pending_state"
         private const val PENDING_PROFILE_ID = "claude_pending_profile_id"
@@ -80,7 +81,7 @@ class ClaudeAuth(
             "grant_type" to "refresh_token",
             "refresh_token" to refresh,
             "client_id" to CLIENT_ID,
-            "scope" to (previous.scope ?: SCOPE),
+            "scope" to REFRESH_SCOPE,
         )
         val body = postTokenWithEncodingFallback(fields)
         val tokens = parseTokens(body, previous)

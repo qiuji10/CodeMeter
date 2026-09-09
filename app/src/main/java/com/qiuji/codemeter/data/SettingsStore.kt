@@ -26,6 +26,16 @@ class SettingsStore(context: Context) {
         it.copy(autoRefreshIntervalMinutes = value.coerceIn(1, 120))
     }
 
+    /** Provider retry cooldowns survive process restarts so a cold start cannot immediately re-hammer a 429. */
+    fun providerCooldownUntil(profileId: String): Long = prefs.getLong("providerCooldown_$profileId", 0L)
+
+    fun setProviderCooldownUntil(profileId: String, epochMs: Long) {
+        if (epochMs <= 0L) prefs.edit().remove("providerCooldown_$profileId").apply()
+        else prefs.edit().putLong("providerCooldown_$profileId", epochMs).apply()
+    }
+
+    fun clearProviderCooldown(profileId: String) = setProviderCooldownUntil(profileId, 0L)
+
     private fun update(transform: (AppSettings) -> AppSettings) {
         val value = transform(_settings.value)
         prefs.edit()

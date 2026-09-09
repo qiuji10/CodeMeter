@@ -20,11 +20,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
 class UsageRepository(
     private val secureStore: SecureStore,
     private val profileStore: ProfileStore,
+    private val settingsStore: SettingsStore,
     private val historyDb: UsageHistoryDb,
     private val claudeAuth: ClaudeAuth,
     private val claudeUsageClient: ClaudeUsageClient,
@@ -52,30 +54,58 @@ class UsageRepository(
 
     fun disconnect(profileId: String) {
         secureStore.clearTokens(profileId)
+        settingsStore.clearProviderCooldown(profileId)
         notifier.clearProfile(profileId)
     }
 
     fun removeProfile(profileId: String) {
         secureStore.clearTokens(profileId)
+        settingsStore.clearProviderCooldown(profileId)
         historyDb.deleteProfile(profileId)
         notifier.clearProfile(profileId)
         _usage.value = _usage.value - profileId
     }
 
     suspend fun refresh(profile: Profile): ProviderUsage = lockFor(profile.id).withLock {
-        var tokens = secureStore.getTokens(profile.id) ?: error("${profile.name} is not connected.")
-        if (tokens.expiresAtEpochMs?.let { it <= System.currentTimeMillis() } == true) {
-            tokens = refreshTokens(profile, tokens)
+        val now = System.currentTimeMillis()
+        val cooldownUntil = settingsStore.providerCooldownUntil(profile.id)
+        if (cooldownUntil > now) {
+            return@withLock staleUsage(profile, "Rate limited", cooldownUntil)
         }
+        if (cooldownUntil != 0L) settingsStore.clearProviderCooldown(profile.id)
+
+        var tokens = secureStore.getTokens(profile.id) ?: error("${profile.name} is not connected.")
 
         val fetched = try {
-            fetch(profile, tokens)
+            if (tokens.expiresAtEpochMs?.let { it <= now } == true || needsClaudeUsageScope(profile, tokens)) {
+                tokens = refreshTokens(profile, tokens)
+            }
+            fetchWithAuthRetry(profile, tokens)
         } catch (e: HttpStatusException) {
-            if (e.statusCode != 401) throw e
-            tokens = refreshTokens(profile, tokens)
-            fetch(profile, tokens)
-        }.copy(profileId = profile.id, profileName = profile.name)
+            when {
+                e.statusCode == 429 -> {
+                    val retryAt = e.retryAfterEpochMs(now) ?: (now + DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+                    settingsStore.setProviderCooldownUntil(profile.id, retryAt)
+                    return@withLock staleUsage(profile, "Rate limited", retryAt)
+                }
+                e.statusCode == 401 || e.statusCode == 400 ->
+                    return@withLock staleUsage(profile, "Authentication expired · reconnect", null)
+                e.statusCode == 403 ->
+                    return@withLock staleUsage(profile, "Usage access denied · reconnect", null)
+                e.statusCode >= 500 -> return@withLock staleUsage(profile, "Provider unavailable", null)
+                else -> throw e
+            }
+        } catch (_: IOException) {
+            return@withLock staleUsage(profile, "Network unavailable", null)
+        }.copy(
+            profileId = profile.id,
+            profileName = profile.name,
+            isStale = false,
+            statusText = null,
+            retryAtEpochMs = null,
+        )
 
+        settingsStore.clearProviderCooldown(profile.id)
         withContext(Dispatchers.IO) { historyDb.insert(fetched) }
         _usage.value = _usage.value + (profile.id to fetched)
         notifier.maybeNotify(fetched)
@@ -93,6 +123,17 @@ class UsageRepository(
     suspend fun history(profile: Profile, sinceEpochMs: Long): List<UsageSnapshot> =
         withContext(Dispatchers.IO) { historyDb.history(profile, sinceEpochMs) }
 
+    private suspend fun fetchWithAuthRetry(profile: Profile, initialTokens: StoredTokens): ProviderUsage {
+        var tokens = initialTokens
+        return try {
+            fetch(profile, tokens)
+        } catch (e: HttpStatusException) {
+            if (e.statusCode != 401) throw e
+            tokens = refreshTokens(profile, tokens)
+            fetch(profile, tokens)
+        }
+    }
+
     private suspend fun fetch(profile: Profile, tokens: StoredTokens): ProviderUsage = when (profile.provider) {
         ProviderId.CLAUDE -> claudeUsageClient.fetch(tokens.accessToken)
         ProviderId.CODEX -> codexUsageClient.fetch(
@@ -106,5 +147,38 @@ class UsageRepository(
         ProviderId.CODEX -> codexAuth.refresh(profile.id, previous)
     }
 
+    private fun needsClaudeUsageScope(profile: Profile, tokens: StoredTokens): Boolean {
+        if (profile.provider != ProviderId.CLAUDE) return false
+        val scope = tokens.scope ?: return false
+        return scope.split(Regex("\\s+")).none { it == "user:profile" }
+    }
+
+    /**
+     * Keep the last successful bars visible during transient provider/network failures.
+     * Stale snapshots are never inserted into history and never trigger quota notifications.
+     */
+    private fun staleUsage(profile: Profile, status: String, retryAtEpochMs: Long?): ProviderUsage {
+        val cached = _usage.value[profile.id] ?: historyDb.latest(profile)
+        val stale = (cached ?: ProviderUsage(
+            provider = profile.provider,
+            profileId = profile.id,
+            profileName = profile.name,
+            windows = emptyList(),
+            updatedAtEpochMs = 0L,
+        )).copy(
+            profileId = profile.id,
+            profileName = profile.name,
+            isStale = true,
+            statusText = status,
+            retryAtEpochMs = retryAtEpochMs,
+        )
+        _usage.value = _usage.value + (profile.id to stale)
+        return stale
+    }
+
     private fun lockFor(profileId: String): Mutex = locks.getOrPut(profileId) { Mutex() }
+
+    private companion object {
+        const val DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5L * 60 * 1000
+    }
 }

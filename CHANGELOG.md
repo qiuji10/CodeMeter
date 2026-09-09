@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.4.0
+
+- Updated Claude Code usage requests to the current OAuth usage request shape, including Claude Code headers and current OAuth scopes.
+- Claude parser now accepts current `limits[]` / `weekly_scoped` model limits, nested `scope.model.display_name`, object-or-array quota buckets, legacy model keys, `percent_left`, and multiple reset timestamp aliases.
+- Claude model-specific limits are discovered dynamically instead of hardcoding one model name.
+- Claude HTTP 429 responses now honor `Retry-After`; the cooldown is persisted across process restarts and CodeMeter keeps the last successful bars visible as stale data instead of blanking the dashboard.
+- Added stale/freshness status such as `Updated 8m ago · Rate limited · retry in 4m`.
+- Transient network/5xx failures preserve the last successful snapshot without inserting fake history points or firing notifications.
+- Updated Codex quota parsing to classify Session/Weekly by `limit_window_seconds`, including the case where a sole weekly window moves into `primary_window`.
+- Codex can fall back to `x-codex-primary-used-percent` / `x-codex-secondary-used-percent` response headers.
+- Added Codex legacy `percent_left` and reset-time aliases.
+- Codex additional/model limits now support both session and weekly windows; Spark remains hidden for Plus profiles and is named from `limit_name`/`metered_feature` when eligible.
+- Added read-only Codex rate-limit reset-credit count using the dedicated reset-credit endpoint with usage-body fallback.
+- Added Codex flex-credit value display when a balance is returned.
+- Every cold start and every warm foreground resume now immediately refreshes all connected profiles, independent of the periodic Auto refresh toggle.
+- Provider-aware refresh prevents foreground/manual/background polling from bypassing an active provider cooldown.
+- Version bumped to 0.4.0 (`versionCode` 14).
+
+
+## 0.3.10
+
+- Codex additional rate limits now use `limit_name` first, with `metered_feature` as a readable fallback.
+- Spark-specific quota telemetry is hidden for ChatGPT Plus profiles because that bucket is not usable by the Plus plan.
+- Other additional/model-specific Codex limits remain visible when the backend returns them.
+
 ## 0.3.8
 
 - Simplified notifications to exactly two user-facing types: **Nearly exhausted** and **Limit reset**.

@@ -286,7 +286,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             is HttpStatusException -> when (error.statusCode) {
                 401 -> "Authentication expired. Reconnect ${profile.name}."
                 403 -> if (profile.provider == ProviderId.CLAUDE) {
-                    "Claude rejected usage access (403). Reconnect ${profile.name}; the private API may have changed."
+                    "Claude usage access was denied (403). Reconnect ${profile.name} to refresh its OAuth scopes."
                 } else {
                     "Codex rejected usage access (403). The private API may have changed."
                 }

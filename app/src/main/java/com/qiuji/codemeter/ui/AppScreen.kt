@@ -142,6 +142,7 @@ fun AppScreen(vm: AppViewModel = viewModel()) {
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+
     LaunchedEffect(
         lifecycleOwner,
         state.settings.autoRefreshEnabled,
@@ -428,6 +429,13 @@ private fun ProfileCard(
             } else if (usage == null) {
                 Text("Connected. Refresh to load quota data.", style = MaterialTheme.typography.bodyMedium)
             } else {
+                if (usage.windows.isEmpty() && usage.statusText != null) {
+                    Text(
+                        "No live quota data yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 usage.windows.forEachIndexed { index, window ->
                     if (index > 0) HorizontalDivider()
                     UsageWindowRow(window, profile.provider, settings)
@@ -435,10 +443,20 @@ private fun ProfileCard(
                 usage.creditsText?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+                val freshnessText = buildString {
+                    if (usage.updatedAtEpochMs > 0L) append("Updated ${formatFreshness(usage.updatedAtEpochMs)}")
+                    else append("No successful update yet")
+                    usage.statusText?.let { status ->
+                        append(" · $status")
+                        usage.retryAtEpochMs?.takeIf { it > System.currentTimeMillis() }?.let { retryAt ->
+                            append(" · retry in ${formatShortRemaining(retryAt)}")
+                        }
+                    }
+                }
                 Text(
-                    "Updated ${formatUpdated(usage.updatedAtEpochMs)}",
+                    freshnessText,
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (usage.isStale) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -954,7 +972,7 @@ private fun SettingsPage(
             SettingsCard("Refresh & fetch") {
                 SettingSwitchRow(
                     title = "Auto refresh",
-                    subtitle = "Automatically refresh connected profiles while CodeMeter is open.",
+                    subtitle = "Periodically refresh connected profiles while CodeMeter is open.",
                     checked = settings.autoRefreshEnabled,
                     onCheckedChange = onAutoRefreshEnabled,
                 )
@@ -994,7 +1012,7 @@ private fun SettingsPage(
                     onCheckedChange = onBackgroundFetchEnabled,
                 )
                 Text(
-                    "Android limits periodic background work to 15 minutes or longer. The selected interval applies directly while the app is open; background fetch uses at least 15 minutes.",
+                    "Opening or returning to CodeMeter always refreshes once. Android limits periodic background work to 15 minutes or longer; the selected interval applies directly while the app is open.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1309,6 +1327,23 @@ private fun copyText(context: Context, label: String, value: String) {
 
 private fun Double.round1(): String = if (this % 1.0 == 0.0) toInt().toString() else "%.1f".format(Locale.US, this)
 
-private fun formatUpdated(epochMs: Long): String = DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
-    .withZone(ZoneId.systemDefault())
-    .format(Instant.ofEpochMilli(epochMs))
+private fun formatFreshness(epochMs: Long, nowEpochMs: Long = System.currentTimeMillis()): String {
+    val deltaSeconds = ((nowEpochMs - epochMs).coerceAtLeast(0L) / 1000L)
+    return when {
+        deltaSeconds < 60 -> "now"
+        deltaSeconds < 3600 -> "${deltaSeconds / 60}m ago"
+        deltaSeconds < 86_400 -> "${deltaSeconds / 3600}h ago"
+        else -> DateTimeFormatter.ofPattern("d MMM · HH:mm", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(epochMs))
+    }
+}
+
+private fun formatShortRemaining(targetEpochMs: Long, nowEpochMs: Long = System.currentTimeMillis()): String {
+    val totalMinutes = ((targetEpochMs - nowEpochMs).coerceAtLeast(0L) + 59_999L) / 60_000L
+    return when {
+        totalMinutes < 60 -> "${totalMinutes}m"
+        totalMinutes < 24 * 60 -> "${totalMinutes / 60}h ${totalMinutes % 60}m"
+        else -> "${totalMinutes / (24 * 60)}d ${totalMinutes % (24 * 60) / 60}h"
+    }
+}

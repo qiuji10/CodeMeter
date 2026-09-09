@@ -14,12 +14,14 @@ There is no companion app and no custom server. The phone authenticates with eac
 - Existing v0.1 single-account credentials/history migrate automatically into normal profiles.
 - Claude Code OAuth + PKCE login with copy/paste authorization code.
 - Codex/ChatGPT device-code login.
-- Claude 5-hour/session, weekly, and model-specific quota parsing.
-- Codex session, weekly, and additional rate-limit parsing.
+- Claude 5-hour/session, weekly, dynamic model-scoped limits, and extra-usage parsing.
+- Codex session, weekly, model-specific limits, flex credits, and read-only reset-credit count.
+- Provider-aware 429 handling with persisted `Retry-After` cooldowns and last-good stale-data fallback.
+- Data freshness state (`Updated ... ago`, provider/rate-limit status, retry countdown).
 - OAuth refresh-token handling for every profile.
 - AES-256-GCM token encryption using Android Keystore.
-- Local 24-hour session-usage history per profile with 0–100% axes, fixed time scale, current-value summaries, and detected reset markers; history is retained for 31 days.
-- Manual refresh, configurable foreground auto-refresh, and optional WorkManager background fetch.
+- Local 24-hour session-usage history per profile on a fixed 0–100% scale with reset detection; history is retained for 31 days.
+- Automatic refresh on every cold start and warm foreground resume, plus manual refresh, configurable foreground auto-refresh, and optional WorkManager background fetch.
 - Two local notification types: nearly-exhausted quota alerts and quota-reset alerts.
 - No analytics, ads, account system, telemetry, server, or desktop dependency.
 
@@ -131,6 +133,7 @@ Current implementation points:
 - Verification page: `https://auth.openai.com/codex/device`
 - OAuth token: `https://auth.openai.com/oauth/token`
 - Usage: `https://chatgpt.com/backend-api/wham/usage`
+- Reset credits: `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
 
 ## Security model
 
@@ -146,11 +149,15 @@ Current implementation points:
 
 A rooted/compromised Android device can still undermine application-level protections.
 
-## Background behavior
+## Refresh and background behavior
 
-Android WorkManager's periodic minimum is 15 minutes. Foreground auto-refresh can use the selected 5/10-minute interval; background fetch uses `max(selected interval, 15 minutes)` and refreshes every connected profile when a network is available. Provider rate limiting and transient server/network errors are retried by WorkManager; auth errors do not create an aggressive retry loop.
+Every time CodeMeter enters the foreground—both a cold process launch and a warm resume—it immediately refreshes every connected profile. This startup/resume refresh is independent of the periodic **Auto refresh** toggle.
 
-Because Android can defer background work for battery optimization/doze, the dashboard's Refresh button is the authoritative way to request an immediate update.
+Android WorkManager's periodic minimum is 15 minutes. Foreground auto-refresh can use the selected 5/10-minute interval; background fetch uses `max(selected interval, 15 minutes)` and refreshes every connected profile when a network is available.
+
+Provider cooldowns are authoritative. If Claude or Codex returns HTTP 429, CodeMeter honors `Retry-After` (or a five-minute fallback), persists that cooldown across process restarts, and suppresses further manual/foreground/background provider calls until it expires. Last-good quota data remains visible and is marked stale. Transient network/5xx failures also preserve last-good data. Stale data is never inserted into history and never triggers quota notifications.
+
+Because Android can defer WorkManager under battery optimization/doze, a background fetch is approximate. Opening/foregrounding CodeMeter always requests an immediate refresh unless the provider is currently in a mandatory cooldown.
 
 ## Project structure
 

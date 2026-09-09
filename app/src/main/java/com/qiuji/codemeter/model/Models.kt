@@ -50,7 +50,11 @@ data class ProviderUsage(
     val plan: String? = null,
     val windows: List<UsageWindow>,
     val creditsText: String? = null,
+    /** Last successful provider fetch. Stale/error annotations must not overwrite this timestamp. */
     val updatedAtEpochMs: Long = System.currentTimeMillis(),
+    val isStale: Boolean = false,
+    val statusText: String? = null,
+    val retryAtEpochMs: Long? = null,
 )
 
 data class StoredTokens(
