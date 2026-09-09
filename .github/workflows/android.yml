@@ -36,11 +36,45 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 37 platform
+      - name: Install Android 17 / API 37 SDK
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-37"
+          set -euo pipefail
+
+          # API 37 (Android 17 / Cinnamon Bun) is currently a preview SDK, so it
+          # is not visible to sdkmanager's default stable channel.
+          (yes 2>/dev/null | sdkmanager --licenses >/dev/null 2>&1) || true
+
+          # Refresh command-line tools first so the runner can see the newest
+          # preview repository metadata.
+          sdkmanager --channel=3 "cmdline-tools;latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+
+          # Google has used both android-37 and android-37.0 package IDs while
+          # API 37 is in preview. Discover the package instead of hardcoding one.
+          SDK_LIST="$(mktemp)"
+          sdkmanager --list --channel=3 > "$SDK_LIST"
+
+          PLATFORM_PACKAGE="$(awk '$1 ~ /^platforms;android-37([.]0)?$/ { print $1; exit }' "$SDK_LIST")"
+          if [[ -z "$PLATFORM_PACKAGE" ]]; then
+            echo "Unable to find an Android 17 / API 37 platform package."
+            echo "Available API 37-related SDK packages:"
+            grep -E 'android-37|37[.]0' "$SDK_LIST" || true
+            exit 1
+          fi
+
+          BUILD_TOOLS_PACKAGE="$(awk '$1 ~ /^build-tools;37([.][0-9]+)+$/ { print $1 }' "$SDK_LIST" | sort -V | tail -n 1)"
+
+          echo "Installing $PLATFORM_PACKAGE"
+          if [[ -n "$BUILD_TOOLS_PACKAGE" ]]; then
+            echo "Installing $BUILD_TOOLS_PACKAGE"
+            sdkmanager --channel=3 "platform-tools" "$PLATFORM_PACKAGE" "$BUILD_TOOLS_PACKAGE"
+          else
+            sdkmanager --channel=3 "platform-tools" "$PLATFORM_PACKAGE"
+          fi
+
+          echo "Installed Android platforms:"
+          ls -la "$ANDROID_SDK_ROOT/platforms"
 
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
