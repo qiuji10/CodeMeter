@@ -4,24 +4,29 @@ import com.qiuji.codemeter.db.UsageHistoryDb
 import com.qiuji.codemeter.model.Profile
 import com.qiuji.codemeter.model.ProviderId
 import com.qiuji.codemeter.model.ProviderUsage
+import com.qiuji.codemeter.model.SessionStartResult
 import com.qiuji.codemeter.model.StoredTokens
 import com.qiuji.codemeter.model.UsageSnapshot
+import com.qiuji.codemeter.model.hasActiveSessionWindow
 import com.qiuji.codemeter.network.HttpStatusException
 import com.qiuji.codemeter.notification.UsageNotifier
 import com.qiuji.codemeter.provider.claude.ClaudeAuth
+import com.qiuji.codemeter.provider.claude.ClaudeSessionClient
 import com.qiuji.codemeter.provider.claude.ClaudeUsageClient
 import com.qiuji.codemeter.provider.codex.CodexAuth
+import com.qiuji.codemeter.provider.codex.CodexSessionClient
 import com.qiuji.codemeter.provider.codex.CodexUsageClient
 import com.qiuji.codemeter.security.SecureStore
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
 
 class UsageRepository(
     private val secureStore: SecureStore,
@@ -30,8 +35,10 @@ class UsageRepository(
     private val historyDb: UsageHistoryDb,
     private val claudeAuth: ClaudeAuth,
     private val claudeUsageClient: ClaudeUsageClient,
+    private val claudeSessionClient: ClaudeSessionClient,
     private val codexAuth: CodexAuth,
     private val codexUsageClient: CodexUsageClient,
+    private val codexSessionClient: CodexSessionClient,
     private val notifier: UsageNotifier,
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
@@ -82,34 +89,93 @@ class UsageRepository(
             }
             fetchWithAuthRetry(profile, tokens)
         } catch (e: HttpStatusException) {
-            when {
-                e.statusCode == 429 -> {
-                    val retryAt = e.retryAfterEpochMs(now) ?: (now + DEFAULT_RATE_LIMIT_COOLDOWN_MS)
-                    settingsStore.setProviderCooldownUntil(profile.id, retryAt)
-                    return@withLock staleUsage(profile, "Rate limited", retryAt)
-                }
-                e.statusCode == 401 || e.statusCode == 400 ->
-                    return@withLock staleUsage(profile, "Authentication expired · reconnect", null)
-                e.statusCode == 403 ->
-                    return@withLock staleUsage(profile, "Usage access denied · reconnect", null)
-                e.statusCode >= 500 -> return@withLock staleUsage(profile, "Provider unavailable", null)
-                else -> throw e
-            }
+            return@withLock handleUsageHttpFailure(profile, e, now)
         } catch (_: IOException) {
             return@withLock staleUsage(profile, "Network unavailable", null)
-        }.copy(
-            profileId = profile.id,
-            profileName = profile.name,
-            isStale = false,
-            statusText = null,
-            retryAtEpochMs = null,
-        )
+        }
 
         settingsStore.clearProviderCooldown(profile.id)
-        withContext(Dispatchers.IO) { historyDb.insert(fetched) }
-        _usage.value = _usage.value + (profile.id to fetched)
-        notifier.maybeNotify(fetched)
-        fetched
+        persistFresh(profile, fetched)
+    }
+
+    /**
+     * Starts a real provider session window with one tiny inference request. This is always an explicit
+     * user action; background/automatic refresh code never calls it.
+     */
+    suspend fun startSessionWindow(profile: Profile): SessionStartResult = lockFor(profile.id).withLock {
+        val now = System.currentTimeMillis()
+        var tokens = secureStore.getTokens(profile.id) ?: error("${profile.name} is not connected.")
+        if (tokens.expiresAtEpochMs?.let { it <= now } == true || needsInferenceScope(profile, tokens)) {
+            tokens = refreshTokens(profile, tokens)
+        }
+
+        // A recent successful dashboard refresh is enough to avoid an extra /usage poll. Otherwise do
+        // one preflight fetch so we never consume quota just to restart an already active 5-hour window.
+        val cached = _usage.value[profile.id]
+        val preflight = if (
+            cached != null &&
+            !cached.isStale &&
+            cached.updatedAtEpochMs > 0L &&
+            now - cached.updatedAtEpochMs <= SESSION_START_CACHE_MAX_AGE_MS
+        ) {
+            cached
+        } else {
+            val cooldownUntil = settingsStore.providerCooldownUntil(profile.id)
+            if (cooldownUntil > now) {
+                error("Usage status is currently rate limited. Wait for the cooldown before starting a session window.")
+            }
+            val fresh = try {
+                fetchWithAuthRetry(profile, tokens)
+            } catch (e: HttpStatusException) {
+                if (e.statusCode == 429) {
+                    val retryAt = e.retryAfterEpochMs(now) ?: (now + DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+                    settingsStore.setProviderCooldownUntil(profile.id, retryAt)
+                    staleUsage(profile, "Rate limited", retryAt)
+                    error("Usage status is rate limited. Wait for the cooldown before starting a session window.")
+                }
+                throw e
+            }
+            persistFresh(profile, fresh)
+        }
+
+        if (preflight.hasActiveSessionWindow()) {
+            return@withLock SessionStartResult(
+                started = false,
+                alreadyActive = true,
+                usage = preflight,
+                refreshConfirmed = true,
+            )
+        }
+
+        // The preflight can refresh/rotate OAuth credentials, so re-read the canonical encrypted record.
+        tokens = secureStore.getTokens(profile.id) ?: tokens
+        triggerSessionWithAuthRetry(profile, tokens)
+
+        // Give the quota backend a short propagation window, then perform only one confirmation fetch to
+        // avoid turning this convenience action into an aggressive usage poller.
+        delay(SESSION_START_CONFIRM_DELAY_MS)
+        val confirmed = try {
+            val latestTokens = secureStore.getTokens(profile.id) ?: tokens
+            val fetched = fetchWithAuthRetry(profile, latestTokens)
+            settingsStore.clearProviderCooldown(profile.id)
+            persistFresh(profile, fetched)
+        } catch (e: HttpStatusException) {
+            if (e.statusCode == 429) {
+                val retryAt = e.retryAfterEpochMs() ?: (System.currentTimeMillis() + DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+                settingsStore.setProviderCooldownUntil(profile.id, retryAt)
+                staleUsage(profile, "Rate limited", retryAt)
+            }
+            null
+        } catch (_: IOException) {
+            null
+        }
+
+        SessionStartResult(
+            started = true,
+            alreadyActive = false,
+            usage = confirmed ?: preflight,
+            refreshConfirmed = confirmed?.hasActiveSessionWindow() == true,
+        )
     }
 
     suspend fun refreshAll(): Map<String, Result<ProviderUsage>> {
@@ -134,9 +200,28 @@ class UsageRepository(
         }
     }
 
+    private suspend fun triggerSessionWithAuthRetry(profile: Profile, initialTokens: StoredTokens) {
+        var tokens = initialTokens
+        try {
+            triggerSession(profile, tokens)
+        } catch (e: HttpStatusException) {
+            if (e.statusCode != 401) throw e
+            tokens = refreshTokens(profile, tokens)
+            triggerSession(profile, tokens)
+        }
+    }
+
     private suspend fun fetch(profile: Profile, tokens: StoredTokens): ProviderUsage = when (profile.provider) {
         ProviderId.CLAUDE -> claudeUsageClient.fetch(tokens.accessToken)
         ProviderId.CODEX -> codexUsageClient.fetch(
+            accessToken = tokens.accessToken,
+            accountId = tokens.accountId ?: error("Codex account id is missing. Reconnect ${profile.name}."),
+        )
+    }
+
+    private suspend fun triggerSession(profile: Profile, tokens: StoredTokens) = when (profile.provider) {
+        ProviderId.CLAUDE -> claudeSessionClient.start(tokens.accessToken)
+        ProviderId.CODEX -> codexSessionClient.start(
             accessToken = tokens.accessToken,
             accountId = tokens.accountId ?: error("Codex account id is missing. Reconnect ${profile.name}."),
         )
@@ -151,6 +236,40 @@ class UsageRepository(
         if (profile.provider != ProviderId.CLAUDE) return false
         val scope = tokens.scope ?: return false
         return scope.split(Regex("\\s+")).none { it == "user:profile" }
+    }
+
+    private fun needsInferenceScope(profile: Profile, tokens: StoredTokens): Boolean {
+        if (profile.provider != ProviderId.CLAUDE) return false
+        val scope = tokens.scope ?: return false
+        return scope.split(Regex("\\s+")).none { it == "user:inference" }
+    }
+
+    private suspend fun persistFresh(profile: Profile, usage: ProviderUsage): ProviderUsage {
+        val fresh = usage.copy(
+            profileId = profile.id,
+            profileName = profile.name,
+            isStale = false,
+            statusText = null,
+            retryAtEpochMs = null,
+        )
+        withContext(Dispatchers.IO) { historyDb.insert(fresh) }
+        _usage.value = _usage.value + (profile.id to fresh)
+        notifier.maybeNotify(fresh)
+        return fresh
+    }
+
+    private fun handleUsageHttpFailure(profile: Profile, error: HttpStatusException, now: Long): ProviderUsage = when {
+        error.statusCode == 429 -> {
+            val retryAt = error.retryAfterEpochMs(now) ?: (now + DEFAULT_RATE_LIMIT_COOLDOWN_MS)
+            settingsStore.setProviderCooldownUntil(profile.id, retryAt)
+            staleUsage(profile, "Rate limited", retryAt)
+        }
+        error.statusCode == 401 || error.statusCode == 400 ->
+            staleUsage(profile, "Authentication expired · reconnect", null)
+        error.statusCode == 403 ->
+            staleUsage(profile, "Usage access denied · reconnect", null)
+        error.statusCode >= 500 -> staleUsage(profile, "Provider unavailable", null)
+        else -> throw error
     }
 
     /**
@@ -180,5 +299,7 @@ class UsageRepository(
 
     private companion object {
         const val DEFAULT_RATE_LIMIT_COOLDOWN_MS = 5L * 60 * 1000
+        const val SESSION_START_CACHE_MAX_AGE_MS = 2L * 60 * 1000
+        const val SESSION_START_CONFIRM_DELAY_MS = 1_500L
     }
 }

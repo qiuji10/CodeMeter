@@ -8,8 +8,10 @@ import com.qiuji.codemeter.db.UsageHistoryDb
 import com.qiuji.codemeter.network.Http
 import com.qiuji.codemeter.notification.UsageNotifier
 import com.qiuji.codemeter.provider.claude.ClaudeAuth
+import com.qiuji.codemeter.provider.claude.ClaudeSessionClient
 import com.qiuji.codemeter.provider.claude.ClaudeUsageClient
 import com.qiuji.codemeter.provider.codex.CodexAuth
+import com.qiuji.codemeter.provider.codex.CodexSessionClient
 import com.qiuji.codemeter.provider.codex.CodexUsageClient
 import com.qiuji.codemeter.security.SecureStore
 
@@ -22,8 +24,10 @@ class AppGraph(context: Context) {
     val notifier = UsageNotifier(context, settingsStore)
     val claudeAuth = ClaudeAuth(http, secureStore)
     val claudeUsage = ClaudeUsageClient(http)
+    val claudeSession = ClaudeSessionClient(http)
     val codexAuth = CodexAuth(http, secureStore)
     val codexUsage = CodexUsageClient(http)
+    val codexSession = CodexSessionClient(http)
     val repository = UsageRepository(
         secureStore = secureStore,
         profileStore = profileStore,
@@ -31,8 +35,10 @@ class AppGraph(context: Context) {
         historyDb = historyDb,
         claudeAuth = claudeAuth,
         claudeUsageClient = claudeUsage,
+        claudeSessionClient = claudeSession,
         codexAuth = codexAuth,
         codexUsageClient = codexUsage,
+        codexSessionClient = codexSession,
         notifier = notifier,
     )
 }

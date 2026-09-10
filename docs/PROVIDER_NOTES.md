@@ -35,6 +35,12 @@ The parser accepts object or array buckets, `utilization`, `used_percent`, `perc
 
 Some current responses repeat the core quotas inside `limits` as `kind: "session"` / `kind: "weekly_all"` while still returning `five_hour` / `seven_day`. Map-shaped payloads may use those semantic names as dictionary keys instead of a `kind` property. CodeMeter preserves those keys, maps them back to Session/Weekly, lets the structured value replace the legacy duplicate, and only keeps `weekly_scoped` / genuinely distinct limits as extra rows. Anonymous `Limit N` rows that exactly match a named quota's percent/reset identity are suppressed as a final schema-drift guard.
 
+### Explicit session start
+
+CodeMeter can explicitly start an inactive 5-hour Claude subscription window from the profile menu. It sends one tiny real inference request to `POST https://api.anthropic.com/v1/messages` with the stored OAuth bearer token, `anthropic-version: 2023-06-01`, `anthropic-beta: oauth-2025-04-20`, the Claude Code user agent, and the Claude Code system identity marker. The body requests only one output token and asks for `Reply with hi.`.
+
+This path needs `user:inference`, is user-triggered only, and must never run from background refresh/startup automation. A fresh usage snapshot is checked first so an already-active session is not needlessly charged.
+
 ### Rate limiting
 
 `/api/oauth/usage` can return aggressive per-account 429s when Claude Code sessions and external monitors poll concurrently. CodeMeter:
@@ -56,6 +62,14 @@ If `Retry-After` is absent, CodeMeter uses a conservative five-minute cooldown.
 - Reset credits: `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
 
 Usage requests include the bearer token and `ChatGPT-Account-Id`. The dedicated reset-credit request is best-effort; failure there must never blank normal quota data.
+
+### Explicit session start
+
+CodeMeter can explicitly start an inactive normal Codex session window from the profile menu. It sends a tiny real Responses request to `POST https://chatgpt.com/backend-api/codex/responses` using the stored ChatGPT bearer token and `ChatGPT-Account-Id`. The request uses `store=false`, streaming, no tools, and asks only for `Reply with hi.`.
+
+The ChatGPT Codex Responses route is an internal/undocumented first-party client contract. CodeMeter identifies itself as `codemeter` rather than impersonating an official Codex originator. Current model candidates are intentionally lightweight-first with compatibility fallbacks. Generic 404/429/provider failures are not sprayed across fallback models; a fallback is attempted only when the response explicitly names the rejected model.
+
+Like Claude, this is user-triggered only and consumes real subscription quota.
 
 ### Window classification
 

@@ -11,8 +11,8 @@ android {
         applicationId = "com.qiuji.codemeter"
         minSdk = 26
         targetSdk = 37
-        versionCode = 15
-        versionName = "0.4.1"
+        versionCode = 16
+        versionName = "0.4.2"
     }
 
     buildFeatures {

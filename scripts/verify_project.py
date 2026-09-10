@@ -18,10 +18,15 @@ required = [
     "app/src/main/java/com/qiuji/codemeter/network/Http.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeAuth.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeUsageClient.kt",
+    "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeSessionClient.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexAuth.kt",
     "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexUsageClient.kt",
+    "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexSessionClient.kt",
     "app/src/main/java/com/qiuji/codemeter/worker/ResetNotificationWorker.kt",
     "app/src/test/java/com/qiuji/codemeter/provider/claude/ClaudeUsageClientTest.kt",
+    "app/src/test/java/com/qiuji/codemeter/provider/claude/ClaudeSessionClientTest.kt",
+    "app/src/test/java/com/qiuji/codemeter/provider/codex/CodexSessionClientTest.kt",
+    "app/src/test/java/com/qiuji/codemeter/model/SessionWindowStateTest.kt",
     ".github/workflows/android.yml",
 ]
 missing = [p for p in required if not (root / p).is_file()]
@@ -57,6 +62,7 @@ assert "ReorderProfilesPage" in screen and "detectDragGesturesAfterLongPress" in
 assert "BackHandler(enabled = showSettings" in screen
 assert "CodeMeter" in screen
 assert "Nearly exhausted" in screen and "Limit reset" in screen
+assert "Start session window" in screen and "Start session" in screen
 assert "data class Profile" in models and "data class AppSettings" in models
 assert 'SQLiteOpenHelper(context, "usage_history.db", null, 2)' in db
 profile_store = (root / "app/src/main/java/com/qiuji/codemeter/data/ProfileStore.kt").read_text()
@@ -87,8 +93,13 @@ assert "RESET_CREDITS_URL" in codex and "rate-limit-reset-credits" in codex
 assert "providerCooldownUntil" in repo and "staleUsage" in repo
 assert "ProcessLifecycleOwner" in app and "override fun onStart" in app
 assert "formatFreshness" in screen and "Rate limited" in repo
+claude_session = (root / "app/src/main/java/com/qiuji/codemeter/provider/claude/ClaudeSessionClient.kt").read_text()
+codex_session = (root / "app/src/main/java/com/qiuji/codemeter/provider/codex/CodexSessionClient.kt").read_text()
+assert "https://api.anthropic.com/v1/messages" in claude_session and '"max_tokens", 1' in claude_session
+assert "https://chatgpt.com/backend-api/codex/responses" in codex_session and 'put("store", false)' in codex_session
+assert "startSessionWindow" in repo and "SESSION_START_CONFIRM_DELAY_MS" in repo
 gradle = (root / "app/build.gradle.kts").read_text()
-assert 'versionName = "0.4.1"' in gradle and "versionCode = 15" in gradle
+assert 'versionName = "0.4.2"' in gradle and "versionCode = 16" in gradle
 workflow = (root / ".github/workflows/android.yml").read_text()
 assert "CODEMETER_KEYSTORE_BASE64" in workflow and "apksigner" in workflow
 assert "Release tags require CodeMeter signing secrets" in workflow

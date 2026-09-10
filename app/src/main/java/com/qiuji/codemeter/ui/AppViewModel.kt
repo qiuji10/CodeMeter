@@ -115,6 +115,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun startSessionWindow(profileId: String) {
+        val profile = profileStore.get(profileId) ?: return
+        if (!repository.isConnected(profileId) || profileId in _state.value.refreshing) return
+        _state.update { it.copy(refreshing = it.refreshing + profileId) }
+        viewModelScope.launch {
+            try {
+                val result = repository.startSessionWindow(profile)
+                if (result.alreadyActive) {
+                    _state.update { it.copy(message = "${profile.name} session window is already active.") }
+                } else if (result.started && result.refreshConfirmed) {
+                    val session = result.usage?.windows?.firstOrNull { window ->
+                        window.label.equals("Session", ignoreCase = true) ||
+                            window.key.equals("session", ignoreCase = true) ||
+                            window.key.equals("five_hour", ignoreCase = true)
+                    }
+                    val reset = session?.resetsAtEpochMs?.let { com.qiuji.codemeter.util.TimeFormat.remaining(it) }
+                    _state.update {
+                        it.copy(message = buildString {
+                            append("${profile.name} session window started")
+                            if (!reset.isNullOrBlank() && reset != "No reset time") append(" · $reset")
+                            append(".")
+                        })
+                    }
+                } else {
+                    _state.update {
+                        it.copy(message = "${profile.name} session-start request succeeded. Usage may take a moment to update.")
+                    }
+                }
+                loadHistory(profile)
+            } catch (e: Throwable) {
+                showSessionStartError(profile, e)
+            } finally {
+                _state.update { it.copy(refreshing = it.refreshing - profileId) }
+            }
+        }
+    }
+
     fun updateClaudeCode(value: String) {
         _state.update { current ->
             current.copy(claudeLogin = current.claudeLogin?.copy(code = value))
@@ -279,6 +316,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val updates = profiles.associate { it.id to repository.history(it, since) }
             _state.update { it.copy(history = it.history + updates) }
         }
+    }
+
+    private fun showSessionStartError(profile: Profile, error: Throwable) {
+        val detail = when (error) {
+            is HttpStatusException -> when (error.statusCode) {
+                400 -> "${profile.name} rejected the minimal session-start request. The provider request format may have changed."
+                401 -> "Authentication expired. Reconnect ${profile.name}."
+                403 -> "${profile.name} does not allow session starting with this login."
+                404 -> "${profile.name} session-start endpoint/model is currently unavailable."
+                429 -> "${profile.name} rejected the session-start request because of a rate/entitlement limit."
+                else -> "${profile.name} session start returned HTTP ${error.statusCode}."
+            }
+            else -> error.message ?: "Could not start ${profile.name}'s session window."
+        }
+        _state.update { it.copy(message = detail) }
     }
 
     private fun showError(profile: Profile, error: Throwable) {

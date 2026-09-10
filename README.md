@@ -118,10 +118,10 @@ PowerShell example for creating the Base64 secret value:
 With all four secrets present, the workflow artifact includes:
 
 ```text
-CodeMeter-v0.4.1.apk                  # signed release; distribute/install this
-CodeMeter-v0.4.1-debug.apk            # CI/debug only
-CodeMeter-v0.4.1-release-unsigned.apk # verification only; Android cannot install it
-CodeMeter-android-v0.4.1-source.zip
+CodeMeter-v0.4.2.apk                  # signed release; distribute/install this
+CodeMeter-v0.4.2-debug.apk            # CI/debug only
+CodeMeter-v0.4.2-release-unsigned.apk # verification only; Android cannot install it
+CodeMeter-android-v0.4.2-source.zip
 SHA256SUMS.txt
 ```
 
@@ -168,6 +168,20 @@ Current implementation points:
 - Usage: `https://chatgpt.com/backend-api/wham/usage`
 - Reset credits: `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
 
+## Start session window
+
+When a connected profile has a fresh successful usage snapshot and its normal 5-hour **Session** window has not started yet, the profile card's three-dot menu shows **Start session window**.
+
+This is an explicit, consequential action: CodeMeter asks for confirmation, then sends one deliberately tiny real inference request (`Reply with hi`) using that profile's existing OAuth login. That small request consumes real quota and starts the provider's normal session timer early. CodeMeter never performs this action automatically, on app startup, during background refresh, or from WorkManager.
+
+After the request succeeds, CodeMeter waits briefly and makes at most one usage refresh to confirm the new reset timestamp. If the provider's usage backend has not propagated the new window yet, the action still reports success and the next normal refresh will pick it up.
+
+Implementation points:
+
+- Claude: `POST https://api.anthropic.com/v1/messages` using the existing `user:inference` OAuth scope, a one-token response, and the Claude Code subscription request marker/header shape.
+- Codex: `POST https://chatgpt.com/backend-api/codex/responses` using the existing ChatGPT bearer token + account id, `store=false`, and a minimal streamed Responses request.
+- Both inference routes are private/undocumented subscription-client behavior and can change independently of the usage endpoints.
+
 ## Security model
 
 - Every profile has its own encrypted OAuth token record.
@@ -210,9 +224,11 @@ app/src/main/java/com/qiuji/codemeter/
 ├── provider/
 │   ├── claude/
 │   │   ├── ClaudeAuth.kt
+│   │   ├── ClaudeSessionClient.kt
 │   │   └── ClaudeUsageClient.kt
 │   └── codex/
 │       ├── CodexAuth.kt
+│       ├── CodexSessionClient.kt
 │       └── CodexUsageClient.kt
 ├── security/SecureStore.kt
 ├── ui/

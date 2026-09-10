@@ -57,6 +57,30 @@ data class ProviderUsage(
     val retryAtEpochMs: Long? = null,
 )
 
+
+/** True when the provider reports that the normal 5-hour/session window has started. */
+fun ProviderUsage.hasActiveSessionWindow(): Boolean {
+    val session = windows.firstOrNull { window ->
+        window.label.equals("Session", ignoreCase = true) ||
+            window.key.equals("session", ignoreCase = true) ||
+            window.key.equals("five_hour", ignoreCase = true)
+    } ?: return false
+    return session.resetsAtEpochMs != null || session.usedPercent > 0.0
+}
+
+/**
+ * Session priming is only offered from a successful, current provider snapshot. A missing Session row
+ * is treated as "not started" because both Claude and Codex can omit an inactive 5-hour window.
+ */
+fun ProviderUsage.canStartSessionWindow(): Boolean = !isStale && !hasActiveSessionWindow()
+
+data class SessionStartResult(
+    val started: Boolean,
+    val alreadyActive: Boolean,
+    val usage: ProviderUsage?,
+    val refreshConfirmed: Boolean,
+)
+
 data class StoredTokens(
     val accessToken: String,
     val refreshToken: String?,

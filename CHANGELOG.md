@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2
+
+- Added an explicit **Start session window** action for inactive Claude Code and Codex 5-hour/session quotas.
+- The action is available only from a fresh successful usage snapshot when the normal Session window is not active.
+- Added a confirmation dialog because the action sends one real inference request and consumes a small amount of quota.
+- Claude uses the existing `user:inference` OAuth scope and sends a one-token Messages request with the current Claude Code subscription request marker/header shape.
+- Codex uses the existing ChatGPT OAuth token/account id and sends a minimal `store=false`, streamed Responses request to the ChatGPT Codex backend.
+- Session starting never runs automatically or in the background; it is user-triggered only.
+- CodeMeter reuses a recent usage snapshot to avoid an unnecessary preflight poll, then performs at most one confirmation usage fetch after the inference request.
+- Added provider model fallbacks for session-start requests while avoiding retries for generic provider outages/rate-limit errors.
+- Kept all v0.4.1 Claude quota de-duplication and signed-release CI behavior unchanged.
+- Version bumped to 0.4.2 (`versionCode` 16).
+
 ## 0.4.1
 
 - Fixed Claude Code duplicate quota rows where the current structured `limits` payload repeated Session/Weekly and CodeMeter displayed them again as `Limit 1` / `Limit 2`.

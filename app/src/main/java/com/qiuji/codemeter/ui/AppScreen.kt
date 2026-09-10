@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenInBrowser
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -110,6 +111,7 @@ import com.qiuji.codemeter.model.ResetDisplayMode
 import com.qiuji.codemeter.model.UsageDisplayMode
 import com.qiuji.codemeter.model.UsageSnapshot
 import com.qiuji.codemeter.model.UsageWindow
+import com.qiuji.codemeter.model.canStartSessionWindow
 import com.qiuji.codemeter.util.TimeFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -130,6 +132,7 @@ fun AppScreen(vm: AppViewModel = viewModel()) {
     var showAddProfile by rememberSaveable { mutableStateOf(false) }
     var renameProfile by remember { mutableStateOf<Profile?>(null) }
     var removeProfile by remember { mutableStateOf<Profile?>(null) }
+    var startSessionProfile by remember { mutableStateOf<Profile?>(null) }
 
     BackHandler(enabled = showReorderProfiles) { showReorderProfiles = false }
     BackHandler(enabled = showSettings && !showReorderProfiles) { showSettings = false }
@@ -231,6 +234,7 @@ fun AppScreen(vm: AppViewModel = viewModel()) {
                             settings = state.settings,
                             onConnect = { vm.connect(profile.id) },
                             onRefresh = { vm.refresh(profile.id) },
+                            onStartSession = { startSessionProfile = profile },
                             onRename = { renameProfile = profile },
                             onDisconnect = { vm.disconnect(profile.id) },
                             onRemove = { removeProfile = profile },
@@ -281,6 +285,28 @@ fun AppScreen(vm: AppViewModel = viewModel()) {
                 ) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { removeProfile = null }) { Text("Cancel") } },
+        )
+    }
+
+    startSessionProfile?.let { profile ->
+        AlertDialog(
+            onDismissRequest = { startSessionProfile = null },
+            title = { Text("Start ${profile.name} session window?") },
+            text = {
+                Text(
+                    "CodeMeter will send one tiny real ${profile.provider.displayName} request (\"Reply with hi\"). " +
+                        "This consumes a small amount of quota and starts the normal session timer early."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.startSessionWindow(profile.id)
+                        startSessionProfile = null
+                    },
+                ) { Text("Start session") }
+            },
+            dismissButton = { TextButton(onClick = { startSessionProfile = null }) { Text("Cancel") } },
         )
     }
 
@@ -352,6 +378,7 @@ private fun ProfileCard(
     settings: AppSettings,
     onConnect: () -> Unit,
     onRefresh: () -> Unit,
+    onStartSession: () -> Unit,
     onRename: () -> Unit,
     onDisconnect: () -> Unit,
     onRemove: () -> Unit,
@@ -400,6 +427,13 @@ private fun ProfileCard(
                                 onClick = { menuExpanded = false; onRefresh() },
                                 leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
                             )
+                            if (usage?.canStartSessionWindow() == true) {
+                                DropdownMenuItem(
+                                    text = { Text("Start session window") },
+                                    onClick = { menuExpanded = false; onStartSession() },
+                                    leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
+                                )
+                            }
                         }
                         DropdownMenuItem(
                             text = { Text("Rename") },
